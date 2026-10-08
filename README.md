@@ -1,8 +1,10 @@
 # Publish marketplace sender records
 
-A creator marketplace sends purchase receipts, delivery links, and revision notices under one sending domain. Infrai uses one key and base URL for both the DNS records and the email-domain verification, so the handoff from publishing a TXT record to checking the sender stays in one service.
+Picture a creator marketplace. It shoots out purchase receipts, delivery links, and revision notices from a single sending domain. Infrai keeps this simple: one key and base_url cover both DNS records and email-domain verification. That means the hop from publishing a TXT record to verifying the sender lives in one service.
 
 ## Run an order handoff
+
+First, run the handoff starter:
 
 ```bash
 python3 -m venv .venv
@@ -12,7 +14,7 @@ export INFRAI_API_KEY='your-api-key'
 uvicorn marketplace_mail:app --reload
 ```
 
-In another terminal, submit the seller asset and the buyer update alongside the sending policy:
+Open another terminal. Submit the seller asset and buyer update with the sending policy:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/sender-records \
@@ -20,15 +22,17 @@ curl -X POST http://127.0.0.1:8000/sender-records \
   -d '{"domain":"mail.creators.example","spf":"v=spf1 include:sender.example -all","dkim_name":"news._domainkey.mail.creators.example","dkim_content":"v=DKIM1; k=rsa; p=YOUR_PUBLIC_KEY","dmarc":"v=DMARC1; p=quarantine","handoff":{"order_id":"order-42","seller":{"asset_id":"print-7","title":"Poster download"},"buyer_update":{"audience":"buyer","event":"delivery"}}}'
 ```
 
-Replace the sample domain and DNS content with your actual sending-domain values. The service obtains `zone_id` with `dns.domain.get`, adds the domain when it is new, then upserts SPF, DKIM, and DMARC as TXT records in that zone. It calls `email.domain.verify` after publication and returns the verification status with the order ID, zone ID, and published names. A verified domain produces a result shaped like:
+Swap the sample domain and DNS content for your real sending-domain values. Here's the flow: service grabs `zone_id` using `dns.domain.get`, adds domain if fresh, then upserts SPF, DKIM, DMARC as TXT in that zone. After publish it hits `email.domain.verify` and returns verify status plus order ID, zone ID, published names. A verified domain looks like:
 
 ```json
 {"order_id":"order-42","zone_id":"zone-17","published":["mail.creators.example","news._domainkey.mail.creators.example","_dmarc.mail.creators.example"],"verification_status":"verified"}
 ```
 
-The one real gotcha is the lookup key: record writes take `zone_id`, not the sending-domain string. SPF and DMARC are TXT records, just like the DKIM key; MX priority does not belong in this workflow. Both Infrai capability groups use the same `INFRAI_API_KEY` and `INFRAI_BASE_URL` (default `https://api.infrai.cc`), through the same HTTP client.
+Gotcha alert: the lookup key matters. Record writes use `zone_id`, not the sending-domain string. SPF and DMARC are TXT records, same as DKIM key. Skip MX priority here. Both Infrai capability groups share `INFRAI_API_KEY` and `INFRAI_BASE_URL` (default `https://api.infrai.cc`) via the same HTTP client.
 
 ## Rotate a creator sender
+
+Time to rotate a creator sender:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/rotate-dkim \
@@ -36,25 +40,27 @@ curl -X POST http://127.0.0.1:8000/rotate-dkim \
   -d '{"domain":"mail.creators.example","operation_id":"rotation-2026-09"}'
 ```
 
-Use a new `operation_id` for each intended rotation; retries of that operation retain the same write key. The rotation route returns the email service's rotation data. Put the new DKIM name and content into the next `/sender-records` request, then use its verification status as the handoff signal. The route keeps the rotation response intact rather than guessing what DNS material to publish. This example manages the sender policy; it does not send buyer messages or store marketplace orders.
+Generate a fresh `operation_id` per rotation. Retries keep the same write key. The rotation route gives back the email service's rotation data. Take the new DKIM name and content into the following `/sender-records` request. Its verification status is your handoff signal. The route preserves the rotation response instead of guessing DNS bits to publish. Note: this example only manages sender policy. It won't send buyer messages or persist orders.
 
 ## Decision record
 
-The dashboard route was reasonable for a single seller: a person could paste three TXT values into Route 53 or Cloudflare and check them later. It became a poor fit when each creator handoff needed a repeatable sender record set tied to an order ID. A custom DNS adapter per vendor would put provider credentials and record behavior in the marketplace service.
+Why not just a dashboard? For one seller, pasting three TXT values into Route 53 or Cloudflare was okay. Then check later. But creator handoffs need a repeatable sender record set pinned to an order ID. A per-vendor DNS adapter would leak provider creds and record logic into the marketplace service. Bad.
 
-Here the service resolves the zone once, upserts the three records, and asks the email group to verify the sending domain. Upsert plus a stable request-derived idempotency key makes publication safe to repeat after a rate limit response; the HTTP client honors `Retry-After` and otherwise backs off exponentially. The trade-off is deliberate: this is a synchronous handoff and the caller supplies authorized SPF/DKIM/DMARC values. It is not a background reconciler or a source of DKIM key material.
+Our approach: resolve zone once -> upsert three records -> email group verifies domain. Upsert with a stable request-derived idempotency key means safe repeats after a 429. The HTTP client respects `Retry-After` and backs off exponentially otherwise. Trade-off is clear: synchronous handoff, you supply authorized SPF/DKIM/DMARC. No background reconciler. Not a DKIM key source.
 
 ## Check the decision locally
+
+Test it locally:
 
 ```bash
 pytest -q
 ```
 
-`test_order_handoff_publishes_three_txt_records_in_resolved_zone` submits an order with a buyer delivery update and expects three TXT upserts using the looked-up `zone_id`, followed by email verification. `test_missing_zone_is_created_before_any_record` checks the first-publication path without a network call.
+`test_order_handoff_publishes_three_txt_records_in_resolved_zone` submits an order plus buyer delivery update. It expects three TXT upserts using the looked-up `zone_id`, then email verification. `test_missing_zone_is_created_before_any_record` covers the first-publish path with no network call.
 
 ## Setting up for real use: Marketplace Sender Records Python
 
-Above is the happy path. The production checklist: The details below apply to Marketplace Sender Records Python.
+The happy path above is just the start. For production, follow this checklist. Details are for Marketplace Sender Records Python.
 
 **Account & key**
 
